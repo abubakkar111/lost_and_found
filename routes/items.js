@@ -26,7 +26,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowedTypes = /jpeg|jpg|png|gif|webp/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
@@ -34,7 +34,7 @@ const upload = multer({
     if (mimetype && extname) {
       return cb(null, true);
     } else {
-      cb(new Error('Only image files are allowed (jpeg, jpg, png, gif, webp)'));
+      cb(new Error('Only image files are allowed'));
     }
   }
 });
@@ -81,17 +81,17 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// Report lost or found item (with Cloudinary upload)
+// Report lost or found item
 router.post('/', auth, upload.single('image'), async (req, res) => {
   try {
     console.log('Creating new item...');
     console.log('User ID:', req.userId);
+    console.log('Body:', req.body);
     
     const { title, description, category, location, dateLostFound, status } = req.body;
     
     // Validate required fields
     if (!title || !description || !category || !location || !status) {
-      // Clean up temp file if exists
       if (req.file && fs.existsSync(req.file.path)) {
         fs.unlinkSync(req.file.path);
       }
@@ -114,7 +114,6 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
         console.log('Image uploaded successfully:', imageUrl);
       } catch (uploadError) {
         console.error('Cloudinary upload error:', uploadError);
-        // Continue without image if upload fails
       }
     }
     
@@ -132,15 +131,12 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
     
     const item = new Item(itemData);
     await item.save();
-    
-    // Populate the reportedBy field before sending response
     await item.populate('reportedBy', 'name email phone');
     
     console.log('Item created successfully:', item._id);
     res.status(201).json(item);
   } catch (error) {
     console.error('Error in POST /items:', error);
-    // Clean up temp file if exists
     if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
@@ -162,7 +158,6 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
     
     const { title, description, category, location, dateLostFound, status } = req.body;
     
-    // Update fields
     if (title) item.title = title.trim();
     if (description) item.description = description.trim();
     if (category) item.category = category;
@@ -170,9 +165,7 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
     if (dateLostFound) item.dateLostFound = dateLostFound;
     if (status) item.status = status;
     
-    // Handle image update
     if (req.file) {
-      // Delete old image from Cloudinary
       if (item.cloudinaryPublicId) {
         try {
           await deleteFromCloudinary(item.cloudinaryPublicId);
@@ -181,7 +174,6 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
         }
       }
       
-      // Upload new image
       try {
         const uploadResult = await uploadToCloudinary(req.file.path, 'lostandfound/items');
         item.imageUrl = uploadResult.url;
@@ -202,7 +194,7 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
   }
 });
 
-// Delete item (admin only)
+// Delete item
 router.delete('/:id', auth, async (req, res) => {
   try {
     if (req.userRole !== 'admin') {
@@ -214,13 +206,11 @@ router.delete('/:id', auth, async (req, res) => {
       return res.status(404).json({ message: 'Item not found' });
     }
     
-    // Delete image from Cloudinary if exists
     if (item.cloudinaryPublicId) {
       try {
         await deleteFromCloudinary(item.cloudinaryPublicId);
-        console.log('Deleted image from Cloudinary:', item.cloudinaryPublicId);
       } catch (deleteError) {
-        console.error('Error deleting image from Cloudinary:', deleteError);
+        console.error('Error deleting image:', deleteError);
       }
     }
     

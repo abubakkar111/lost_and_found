@@ -2,45 +2,77 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const http = require('http');
-const socketIo = require('socket.io');
 const path = require('path');
 const fs = require('fs');
 
 dotenv.config();
 
 const app = express();
-const server = http.createServer(app);
-const io = socketIo(server, {
-  cors: {
-    origin: "http://localhost:5173",
-    credentials: true
-  }
-});
 
-// Check Cloudinary configuration
-if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
-  console.warn('⚠️  Warning: Cloudinary credentials not configured. Image upload will not work.');
-  console.warn('Please add CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET to .env file');
-}
+// Dynamic CORS for Bonto deployment
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  process.env.CORS_ORIGIN,
+  'https://your-frontend.vercel.app', // Replace with your frontend URL
+  'https://*.vercel.app', // Allow all Vercel preview deployments
+  process.env.FRONTEND_URL
+].filter(Boolean);
 
-// Create temp directory for uploads
-const tempDir = path.join(__dirname, 'temp');
-if (!fs.existsSync(tempDir)) {
-  fs.mkdirSync(tempDir, { recursive: true });
-}
+app.use(cors({
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) return callback(null, true);
+    
+    // Check if origin is allowed
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      return callback(null, true);
+    }
+    
+    // Allow any vercel.app domain
+    if (origin.includes('.vercel.app')) {
+      return callback(null, true);
+    }
+    
+    callback(new Error(`CORS policy does not allow ${origin}`));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+}));
 
-// Middleware
-app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Create necessary directories for Bonto
+const tempDir = path.join(__dirname, 'temp');
+const uploadsDir = path.join(__dirname, 'uploads');
+
+if (!fs.existsSync(tempDir)) {
+  fs.mkdirSync(tempDir, { recursive: true });
+  console.log('✅ Created temp directory');
+}
+
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  console.log('✅ Created uploads directory');
+}
+
+// Serve static files
+app.use('/uploads', express.static(uploadsDir));
+
 // MongoDB Connection
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/lostandfound';
+const MONGODB_URI = process.env.MONGODB_URI;
+if (!MONGODB_URI) {
+  console.error('❌ MONGODB_URI is not defined');
+  process.exit(1);
+}
 
 mongoose.connect(MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
+  serverSelectionTimeoutMS: 5000,
+  socketTimeoutMS: 45000,
 })
 .then(() => {
   console.log('✅ MongoDB Connected Successfully');
@@ -48,28 +80,8 @@ mongoose.connect(MONGODB_URI, {
 })
 .catch(err => {
   console.error('❌ MongoDB Connection Error:', err.message);
-  console.log('\n💡 Troubleshooting Tips:');
-  console.log('1. Make sure MongoDB is installed');
-  console.log('2. Run: mongod --dbpath C:\\data\\db');
-  console.log('3. Or use MongoDB Atlas cloud database');
-  process.exit(1);
+  // Don't exit, just log the error
 });
-
-// Socket.io for real-time notifications
-io.on('connection', (socket) => {
-  console.log('🔌 New client connected');
-  
-  socket.on('join', (userId) => {
-    socket.join(userId);
-    console.log(`👤 User ${userId} joined their room`);
-  });
-  
-  socket.on('disconnect', () => {
-    console.log('🔌 Client disconnected');
-  });
-});
-
-app.set('io', io);
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -85,35 +97,83 @@ app.use('/api/claims', claimRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/admin', adminRoutes);
 
-// Health check endpoint
+// Health check endpoint (important for Bonto to keep alive)
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     mongodb: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected',
-    cloudinary: process.env.CLOUDINARY_CLOUD_NAME ? 'Configured' : 'Not Configured',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+// Keep-alive endpoint for Bonto
+app.get('/api/ping', (req, res) => {
+  res.json({ pong: Date.now() });
+});
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Lost & Found API',
+    version: '1.0.0',
+    status: 'running',
+    endpoints: {
+      auth: '/api/auth',
+      items: '/api/items',
+      claims: '/api/claims',
+      admin: '/api/admin',
+      health: '/api/health'
+    }
   });
 });
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error('❌ Error:', err.stack);
+  console.error('❌ Error:', err.message);
+  console.error('Stack:', err.stack);
+  
   res.status(500).json({ 
     message: 'Something went wrong!', 
-    error: err.message,
-    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    error: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message
   });
 });
 
 // 404 handler
 app.use((req, res) => {
-  res.status(404).json({ message: `Route ${req.url} not found` });
+  res.status(404).json({ 
+    message: `Route ${req.method} ${req.url} not found`,
+    availableEndpoints: [
+      '/api/auth/login',
+      '/api/auth/register',
+      '/api/items',
+      '/api/claims',
+      '/api/health'
+    ]
+  });
 });
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`\n🚀 Server running on port ${PORT}`);
   console.log(`📡 API URL: http://localhost:${PORT}/api`);
   console.log(`🏥 Health Check: http://localhost:${PORT}/api/health`);
-  console.log(`☁️  Cloudinary: ${process.env.CLOUDINARY_CLOUD_NAME ? 'Configured ✅' : 'Not Configured ⚠️'}\n`);
+  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🔗 CORS Origins:`, allowedOrigins);
 });
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM signal received: closing HTTP server');
+  server.close(() => {
+    console.log('HTTP server closed');
+    mongoose.connection.close(false, () => {
+      console.log('MongoDB connection closed');
+      process.exit(0);
+    });
+  });
+});
+
+module.exports = app;
